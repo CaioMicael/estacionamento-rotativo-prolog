@@ -14,36 +14,79 @@ pergunta_s_n(Campo, Texto) :-
     ).
 
 coletar_observacoes :-
-    format("Insercao de registros de estacionamento.~n"),
-    format("Informe a capacidade do estacionamento (numero inteiro). Deixe em branco para default.~n"),
-    read(Cap),
-    ( Cap = [] -> true ; assertz(obs(capacity(Cap))) ),
-
+    format("~n=== Configuracao do Estacionamento ===~n"),
+    format("Por favor, informe os dados abaixo:~n~n"),
+    get_valid_capacity,
     collect_vehicles.
 
+% Helper para garantir entrada de capacidade válida
+get_valid_capacity :-
+    format("Digite a capacidade total de vagas (numero inteiro positivo): "),
+    read(Cap),
+    (number(Cap), Cap > 0) ->
+        assertz(obs(capacity(Cap))),
+        format("Capacidade configurada para ~w vagas.~n~n", [Cap])
+    ;   format("~nErro: Por favor digite um numero inteiro positivo.~n~n"),
+        get_valid_capacity.
+
 collect_vehicles :-
-  format("\nDeseja inserir um registro de veiculo? (s/n): "),
+  format("~n=== Registro de Veiculos ===~n"),
+  format("Opcoes: [s] Inserir novo veiculo, [n] Finalizar registros~n"),
+  format("Deseja inserir um registro de veiculo? [s/n]: "),
   read(R), downcase_atom(R, Ans),
-  ( Ans == s -> collect_one, collect_vehicles ; Ans == n -> true ; format("Entrada invalida.~n"), collect_vehicles ).
+  ( Ans == s -> collect_one, collect_vehicles
+  ; Ans == n -> format("~nFinalizando coleta de registros...~n")
+  ; format("~nEntrada invalida! Por favor digite 's' para sim ou 'n' para nao.~n~n"), 
+    collect_vehicles ).
 
 collect_one :-
-  format("Placa (atom): "), read(Plate),
-  format("Mensalista? (s/n): "), read(M), downcase_atom(M, Mlow),
-  ( Mlow == s -> Mens = sim ; Mens = nao ),
-  format("PNE (isencao)? (s/n): "), read(P), downcase_atom(P, Plow),
-  ( Plow == s -> PNE = sim ; PNE = nao ),
+  format("~n--- Novo Registro de Veiculo ---~n"),
+  format("Placa do veiculo (Ex: ABC1234): "), read(Plate),
+  
+  format("~nTipo de usuario:~n"),
+  format("Tipo de cliente:~n"),
+  format("1) Avulso (paga por uso)~n"),
+  format("2) Mensalista (R$300,00/mes)~n"),
+  format("3) PNE (isento)~n"),
+  format("Escolha o tipo [1-3]: "), read(Tipo),
+  ( Tipo = 1 -> Mens = nao, PNE = nao
+  ; Tipo = 2 -> Mens = sim, PNE = nao
+  ; Tipo = 3 -> Mens = nao, PNE = sim
+  ; format("Opcao invalida. Considerando como avulso.~n"),
+    Mens = nao, PNE = nao
+  ),
+  
   % entrada: dia e hora
-  format("Entrada - dia (inteiro): "), read(EDay),
-  format("Entrada - hora (HH:MM) (ex: 08:30): "), read(ETimeAtom), atom_string(ETimeAtom, ETimeStr),
-  parse_time_hm(ETimeStr, EH, EM),
-  EntryMin is EDay * 24 * 60 + EH*60 + EM,
+  format("~nDados de Entrada:~n"),
+  format("Dia (0=hoje, 1=amanha, etc): "), read(EDay),
+  format("Hora (formato HH:MM, ex: 08:30): "), read(ETimeAtom), atom_string(ETimeAtom, ETimeStr),
+  ( parse_time_hm(ETimeStr, EH, EM) -> 
+    EntryMin is EDay * 24 * 60 + EH*60 + EM
+  ; format("~nErro: Formato de hora invalido! Use HH:MM (ex: 08:30).~n"),
+    fail
+  ),
+  
   % saida
-  format("Saida - dia (inteiro): "), read(XDay),
-  format("Saida - hora (HH:MM) (ex: 15:45): "), read(XTimeAtom), atom_string(XTimeAtom, XTimeStr),
-  parse_time_hm(XTimeStr, XH, XM),
-  ExitMin is XDay * 24 * 60 + XH*60 + XM,
-  assertz(vehicle_record(Plate, EntryMin, ExitMin, Mens, PNE)),
-  format("Registro inserido para ~w.~n", [Plate]).
+  format("~nDados de Saida:~n"),
+  format("Dia (0=hoje, 1=amanha, etc): "), read(XDay),
+  format("Hora (formato HH:MM, ex: 15:45): "), read(XTimeAtom), atom_string(XTimeAtom, XTimeStr),
+  ( parse_time_hm(XTimeStr, XH, XM) ->
+    ExitMin is XDay * 24 * 60 + XH*60 + XM
+  ; format("~nErro: Formato de hora invalido! Use HH:MM (ex: 15:45).~n"),
+    fail
+  ),
+  
+  % Validar que saída é após entrada
+  ( ExitMin > EntryMin ->
+    assertz(vehicle_record(Plate, EntryMin, ExitMin, Mens, PNE)),
+    format("~nRegistro inserido com sucesso para o veiculo ~w!~n", [Plate]),
+    ( (Mens = sim ; PNE = sim) -> 
+        format("Status: Isento de pagamento~n")
+    ; format("Status: Pagante normal~n")
+    )
+  ; format("~nErro: A data/hora de saida deve ser posterior a entrada!~n"),
+    fail
+  ).
 
 parse_time_hm(TimeStr, H, M) :-
   ( sub_string(TimeStr, Before, 1, After, ':') ->

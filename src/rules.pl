@@ -1,159 +1,127 @@
 % rules.pl
-% Regras do dominio e meta principal
+% Regras principais de cálculo e resumo
 
 :- dynamic obs/1.
 :- dynamic fired/1.
 :- dynamic vehicle_record/5.
+:- discontiguous meta/1.
 
-% meta/1: calcula resultados para todos os veículos inseridos
-% Resultado: summary(TotaisPorVeiculo, SomaTotal, OcupacaoMedia)
+% Meta: calcula os resultados gerais
 meta(summary(Totals, SumTotal, OccupancyMean)) :-
-  % recolher todos os registros
   findall(V, vehicle_record(V,_,_,_,_), Plates),
   Plates \= [],
-  maplist(calc_vehicle, Plates, VehicleResults),
-  % VehicleResults = [res(Plate,Breakdown,Total,DurationMins,RulesFired), ...]
-  aggregate_results(VehicleResults, Totals, SumTotal, AvgDuration),
-  compute_occupancy(AvgDuration, OccupancyMean),
+  maplist(calc_vehicle, Plates, Results),
+  aggregate_results(Results, Totals, SumTotal, AvgDur),
+  compute_occupancy(AvgDur, OccupancyMean),
   SumTotal >= 0.
 
-/* ===== Predicados auxiliares ===== */
+meta(_) :- fail.
 
+% Cálculo por veículo
 calc_vehicle(Plate, res(Plate, Breakdown, Total, Duration, FiredRules)) :-
   retractall(fired(_)),
   vehicle_record(Plate, Entry, Exit, Mensalista, PNE),
   compute_duration(Entry, Exit, Duration),
-  ( (Mensalista == sim ; PNE == sim) ->
+  ( PNE == sim ->
       Total = 0.0,
-      Breakdown = [exempt(Motivo) | []],
-      (Mensalista == sim -> assertz(fired(exemption_mensalista)); true),
-      (PNE == sim -> assertz(fired(exemption_pne)); true)
-  ; % senão calcular normalmente
-    block_minutes(B),
+      Breakdown = [exempt(pne)],
+      assertz(fired(exemption_pne))
+  ; Mensalista == sim ->
+      monthly_fee(Fee),
+      Total = Fee,
+      Breakdown = [monthly(Fee)],
+      assertz(fired(monthly_subscriber))
+  ; block_minutes(B),
     round_up(Duration, B, Rounded),
     assertz(fired(rounding_block(Rounded,B))),
-    compute_cost_by_bands(Rounded, Breakdown, PartialCost),
-    apply_daily_cap(Rounded, PartialCost, CostAfterCap),
+    compute_cost_by_bands(Rounded, Breakdown, Partial),
+    apply_daily_cap(Rounded, Partial, CostAfterCap),
     apply_night_pernoite(Entry, Exit, CostAfterCap, Total)
   ),
   findall(R, fired(R), FiredRules).
 
-% compute_duration: espera Entry e Exit no formato minutes_since_epoch(Days*24*60 + minutes)
-compute_duration(Entry, Exit, Duration) :-
-  Duration is max(0, Exit - Entry).
+compute_duration(Entry, Exit, D) :- D is max(0, Exit - Entry).
+round_up(D, Block, R) :- R is ((D + Block - 1) // Block) * Block.
 
-% round_up(Duration, Block, Rounded)
-round_up(Duration, Block, Rounded) :-
-  R is (Duration + Block - 1) // Block * Block,
-  Rounded = R.
-
-% compute_cost_by_bands(DurationMin, BreakdownList, Cost)
+% Cálculo por faixas
 compute_cost_by_bands(Duration, Breakdown, Cost) :-
-  % alocar minutos por faixa
-  findall(f(F,L,RH), faixa(F,L,RH), Faixas0),
-  sort_faixas(Faixas0, Faixas),
-  allocate_minutes(Faixas, Duration, Alloc),
-  compute_cost_alloc(Alloc, Breakdown, Cost).
+  findall(f(F,L,RH), faixa(F,L,RH), F0),
+  sort_faixas(F0, F),
+  allocate_minutes(F, Duration, A),
+  compute_cost_alloc(A, Breakdown, Cost).
 
-sort_faixas(Faixas0, Faixas) :-
-  % ordenar por limite ascendente, mantendo faixa com limite 0 por último
-  map_list_to_pairs(faixa_sort_key, Faixas0, Pairs),
-  keysort(Pairs, Sorted),
-  pairs_values(Sorted, Faixas).
+sort_faixas(F0, F) :-
+  map_list_to_pairs(faixa_sort_key, F0, P),
+  keysort(P, S),
+  pairs_values(S, F).
 
-faixa_sort_key(f(F,L,R), Key) :-
-  (L =:= 0 -> Key = 999999 ; Key = L).
+faixa_sort_key(f(_,L,_), K) :- (L =:= 0 -> K = 999999 ; K = L).
 
 allocate_minutes([], _, []).
-allocate_minutes([f(Name,Lim,Rate)|T], Remaining, [alloc(Name,Use,Lim,Rate)|AllocT]) :-
-  ( Lim =:= 0 -> Use = Remaining
-  ; Use is min(Remaining, Lim)
-  ),
-  Rem2 is Remaining - Use,
-  ( Rem2 < 0 -> Rem3 = 0 ; Rem3 = Rem2 ),
-  allocate_minutes(T, Rem3, AllocT).
+allocate_minutes([f(N,L,R)|T], Rem, [alloc(N,U,L,R)|A]) :-
+  (L =:= 0 -> U = Rem ; U is min(Rem, L)),
+  Rem2 is max(0, Rem - U),
+  allocate_minutes(T, Rem2, A).
 
 compute_cost_alloc(Alloc, Breakdown, Cost) :-
-  % rates por hora -> converter para por minuto
   compute_cost_alloc(Alloc, 0.0, [], Cost, Breakdown).
-compute_cost_alloc([], AccCost, AccB, AccCost, AccB).
-compute_cost_alloc([alloc(Name,Use,Lim,Rate)|T], AccCost, AccB, CostOut, Breakdown) :-
-  PerMin is Rate / 60.0,
-  ThisCost is Use * PerMin,
-  format(atom(Desc), "~w: ~w min @ R$~2f/h => R$~2f", [Name, Use, Rate, ThisCost]),
-  append(AccB, [band(Name,Use,Rate,ThisCost)], NB),
-  Acc2 is AccCost + ThisCost,
+
+compute_cost_alloc([], Acc, AccB, Acc, AccB).
+compute_cost_alloc([alloc(N,U,_,R)|T], Acc, B, CostOut, Breakdown) :-
+  C is U * (R / 60.0),
+  append(B, [band(N,U,R,C)], NB),
+  Acc2 is Acc + C,
   compute_cost_alloc(T, Acc2, NB, CostOut, Breakdown).
 
-% apply_daily_cap(DurationMin, CostIn, CostOut)
+% Limites e taxas adicionais
 apply_daily_cap(Duration, CostIn, CostOut) :-
   daily_cap(Cap),
   Days is ceiling(Duration / (24*60)),
   Max is Cap * Days,
-  ( CostIn > Max -> CostOut = Max, assertz(fired(daily_cap_applied(Max))) ; CostOut = CostIn ).
+  ( CostIn > Max ->
+      CostOut = Max, assertz(fired(daily_cap_applied(Max)))
+  ; CostOut = CostIn ).
 
-% apply_night_pernoite: checa se incide taxa noturna e pernoite
 apply_night_pernoite(Entry, Exit, CostIn, CostOut) :-
   ( pernoite(Entry,Exit) ->
-      pernoite_fee(F),
-      Cost1 is CostIn + F,
-      assertz(fired(pernoite_fee(F)))
-  ; Cost1 = CostIn ),
+      pernoite_fee(F), C1 is CostIn + F, assertz(fired(pernoite_fee(F)))
+  ; C1 = CostIn ),
   ( night_period_overlap(Entry,Exit) ->
-      night_fee(NF),
-      Cost2 is Cost1 + NF,
-      assertz(fired(night_fee(NF)))
-  ; Cost2 = Cost1 ),
-  CostOut is round_to_2_decimals(Cost2).
+      night_fee(NF), C2 is C1 + NF, assertz(fired(night_fee(NF)))
+  ; C2 = C1 ),
+  round_to_2_decimals(C2, CostOut).
 
-% pernoite se saída estiver em dia posterior (diferença > 24h? para simplicidade: se exit_day > entry_day)
-pernoite(Entry, Exit) :-
-  EntryDay is Entry // (24*60),
-  ExitDay is Exit // (24*60),
-  ExitDay > EntryDay.
+pernoite(E, S) :- E // (24*60) < S // (24*60).
 
-% night_period_overlap: verifica se há interseção entre [Entry,Exit] e qualquer periodo 20:00..06:00
-night_period_overlap(Entry, Exit) :-
-  % converter minutos desde epoch para minuto do dia (0..1439) e dias
-  EntryDay is Entry // (24*60), EntryM is Entry mod (24*60),
-  ExitDay is Exit // (24*60), ExitM is Exit mod (24*60),
-  % se atravessa dias, iterar por cada dia
+night_period_overlap(E, S) :-
+  number(E), number(S),
   night_start(NS), night_end(NE),
-  between(EntryDay, ExitDay, D),
-  DayStart is D * 24 * 60,
-  PeriodStart is DayStart + NS,
-  ( NE =< NS -> PeriodEnd is DayStart + 24*60, PeriodEnd2 is (D+1)*24*60 + NE, % night spans midnight
-    ( overlap_interval(Entry,Exit,PeriodStart,PeriodEnd) ; overlap_interval(Entry,Exit,DayStart,PeriodEnd2) )
-  ; PeriodEnd is DayStart + NE, overlap_interval(Entry,Exit,PeriodStart,PeriodEnd) ).
+  EMin is E mod (24*60),
+  SMin is S mod (24*60),
+  ( (NE =< NS, (EMin >= NS ; SMin =< NE))
+  ; (NE > NS, EMin < NE, SMin > NS) ).
 
 overlap_interval(A1,A2,B1,B2) :-
-  MaxStart is max(A1,B1), MinEnd is min(A2,B2), MaxStart < MinEnd.
+  number(A1), number(A2), number(B1), number(B2),
+  max(A1,B1,Start), min(A2,B2,End), Start < End.
 
-round_to_2_decimals(Val, Out) :- Out is round(Val*100)/100.
-round_to_2_decimals(Val) :- round_to_2_decimals(Val, _).
+round_to_2_decimals(V, O) :- O is round(V*100)/100.
 
-% aggregate_results: soma totais e prepara lista de totais por veiculo
-aggregate_results(Results, Totals, SumTotal, AvgDuration) :-
-  aggregate_results(Results, [], 0.0, 0, SumTotal, Totals, AvgDuration).
-aggregate_results([], AccT, AccSum, Count, AccSum, RevT, Avg) :- reverse(AccT, RevT), (Count =:= 0 -> Avg = 0 ; Avg is AccSum / Count).
-aggregate_results([res(Plate,Break,Total,Duration,Rules)|T], AccT, AccSum, Count, SumOut, TotalsOut, Avg) :-
-  append(AccT, [vehicle_summary(Plate,Break,Total,Duration,Rules)], NewAcc),
-  AccSum2 is AccSum + Total,
+% Agregação e ocupação
+aggregate_results(R, T, S, A) :- aggregate_results(R, [], 0.0, 0, S, T, A).
+aggregate_results([], Acc, Sum, Count, Sum, Rev, Avg) :-
+  reverse(Acc, Rev),
+  (Count =:= 0 -> Avg = 0 ; Avg is Sum / Count).
+aggregate_results([res(P,B,T,D,R)|L], Acc, Sum, Count, SOut, Tout, Avg) :-
+  append(Acc, [vehicle_summary(P,B,T,D,R)], NAcc),
+  Sum2 is Sum + T,
   Count2 is Count + 1,
-  aggregate_results(T, NewAcc, AccSum2, Count2, SumOut, TotalsOut, Avg).
+  aggregate_results(L, NAcc, Sum2, Count2, SOut, Tout, Avg).
 
-% compute_occupancy: usa average duration (min) e capacidade para calcular ocupacao media (simples)
-compute_occupancy(AvgDurationMin, OccupancyPerc) :-
+compute_occupancy(AvgMin, Occ) :-
   ( obs(capacity(C)) -> true ; default_capacity(C) ),
-  % ocupacao media = (tempo medio por veiculo / (24*60)) * 100 / (1/C) ???
-  % Simplificamos: ocupacao média por vaga = (AvgDurationMin / (24*60)) * numero_veiculos_media
-  % Como não temos numero_veiculos_media, apresentamos ocupacao relativa ao periodo de 24h: percentagem de um dia ocupado por vaga
-  OccupancyPerc is round((AvgDurationMin / (24*60)) * 100).
+  Occ is round((AvgMin / (24*60)) * 100).
 
-% pretty helper to avoid false negatives
 between(A,B,X) :- A =< X, X =< B.
-
-% fallback para caso não hajam registros
-meta(_):- fail.
-
-% fim de rules.pl
+max(A,B,A) :- A >= B.
+max(A,B,B) :- B > A. 
