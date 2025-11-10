@@ -7,20 +7,32 @@ Estrutura:
 
 estacionamento-rotativo-prolog/
   src/
-    main.pl      % menu + orquestração do fluxo
-    kb.pl        % fatos, tabelas e domínios
-    rules.pl     % regras e meta/1 (resultado principal)
-    ui.pl        % perguntas e assert das observações
-    explain.pl   % impressão da trilha das regras
+    main.pl      % Menu principal e orquestração do fluxo
+    kb.pl        % Base de conhecimento (tarifas, regras, constantes)
+    rules.pl     % Motor de inferência e cálculos
+    ui.pl        % Interface com usuário e coleta de dados
+    explain.pl   % Geração de relatórios e explicações
+```
 
-Como executar (Windows + SWI-Prolog):
+## Pré-requisitos
 
-1. Abra um terminal PowerShell e entre na pasta do projeto (onde está este README):
+- SWI-Prolog instalado (https://www.swi-prolog.org/download/stable)
+- Windows PowerShell ou Terminal
 
+## Como Executar
+
+1. Clone este repositório:
+   ```
+   git clone https://github.com/CaioMicael/estacionamento-rotativo-prolog.git
+   ```
+
+2. Navegue até a pasta do projeto:
+   ```powershell
    cd C:\Users\<seu_usuario>\Documents\estacionamento-rotativo-prolog
+   ```
 
-2. Inicie o SWI-Prolog e carregue o arquivo main:
-
+3. Inicie o SWI-Prolog e carregue o sistema:
+   ```prolog
    swipl
    ?- ['src/main.pl'].
    ?- start.
